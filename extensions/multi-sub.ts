@@ -1,5 +1,5 @@
 /**
- * Multi-Subscription extension for pi.
+ * Multi-Subscription extension for Oh My Pi.
  *
  * Register additional OAuth subscription accounts for any supported provider.
  * Each extra account gets its own provider name, /login entry, and cloned models.
@@ -7,7 +7,7 @@
  * Features:
  *   - /subs: manage subscriptions (add, remove, login, logout, status)
  *   - /pool: define provider pools with auto-rotation on rate limit errors
- *   - Project-level pool config: .pi/multi-pass.json overrides global pools
+ *   - Project-level pool config: .omp/multi-pass.json overrides global pools
  *   - MULTI_SUB env var for scripting
  *
  * Pool auto-rotation: group subscriptions into pools. When the active sub
@@ -16,8 +16,8 @@
  * provider/account.
  *
  * Config files:
- *   Global:  ~/.pi/agent/multi-pass.json  (subscriptions + default pools)
- *   Project: .pi/multi-pass.json          (pool overrides + subscription filtering)
+ *   Global:  ~/.omp/agent/multi-pass.json  (subscriptions + default pools)
+ *   Project: .omp/multi-pass.json          (pool overrides + subscription filtering)
  *
  * Project-level config can:
  *   - Define project-specific pools (override global pools)
@@ -39,44 +39,38 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	AgentEndEvent,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import {
 	BorderedLoader,
 	DynamicBorder,
 	getAgentDir,
 	keyHint,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import {
-	anthropicOAuthProvider,
 	loginAnthropic,
 	refreshAnthropicToken,
-	openaiCodexOAuthProvider,
 	loginOpenAICodex,
 	refreshOpenAICodexToken,
-	githubCopilotOAuthProvider,
 	loginGitHubCopilot,
 	refreshGitHubCopilotToken,
 	getGitHubCopilotBaseUrl,
 	normalizeDomain,
-	geminiCliOAuthProvider,
 	loginGeminiCli,
 	refreshGoogleCloudToken,
-	antigravityOAuthProvider,
 	loginAntigravity,
 	refreshAntigravityToken,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderInterface,
-} from "@mariozechner/pi-ai/oauth";
-import { getModels, type Api, type Model } from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai/utils/oauth";
+import { getBundledModels, type Api, type Model } from "@oh-my-pi/pi-ai";
 import {
 	Container,
-	Key,
 	SelectList,
 	Text,
 	matchesKey,
 	type SelectItem,
-} from "@mariozechner/pi-tui";
+} from "@oh-my-pi/pi-tui";
 
 // ==========================================================================
 // Provider templates
@@ -87,7 +81,6 @@ type GeminiCredentials = OAuthCredentials & { projectId?: string };
 
 interface ProviderTemplate {
 	displayName: string;
-	builtinOAuth: OAuthProviderInterface;
 	usesCallbackServer?: boolean;
 	buildOAuth(index: number): Omit<OAuthProviderInterface, "id">;
 	buildModifyModels?(providerName: string): OAuthProviderInterface["modifyModels"];
@@ -96,7 +89,6 @@ interface ProviderTemplate {
 const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 	anthropic: {
 		displayName: "Anthropic (Claude Pro/Max)",
-		builtinOAuth: anthropicOAuthProvider,
 		buildOAuth(index: number) {
 			return {
 				name: `Anthropic #${index}`,
@@ -120,7 +112,6 @@ const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 
 	"openai-codex": {
 		displayName: "ChatGPT Plus/Pro (Codex)",
-		builtinOAuth: openaiCodexOAuthProvider,
 		usesCallbackServer: true,
 		buildOAuth(index: number) {
 			return {
@@ -146,7 +137,6 @@ const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 
 	"github-copilot": {
 		displayName: "GitHub Copilot",
-		builtinOAuth: githubCopilotOAuthProvider,
 		buildOAuth(index: number) {
 			return {
 				name: `GitHub Copilot #${index}`,
@@ -184,7 +174,6 @@ const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 
 	"google-gemini-cli": {
 		displayName: "Google Cloud Code Assist",
-		builtinOAuth: geminiCliOAuthProvider,
 		usesCallbackServer: true,
 		buildOAuth(index: number) {
 			return {
@@ -212,7 +201,6 @@ const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 
 	"google-antigravity": {
 		displayName: "Antigravity",
-		builtinOAuth: antigravityOAuthProvider,
 		usesCallbackServer: true,
 		buildOAuth(index: number) {
 			return {
@@ -713,14 +701,14 @@ async function showWrappedSelect(
 					? options.items.findIndex((item) => item.value === current.value)
 					: 0;
 
-				if (matchesKey(data, Key.up) && options.items.length > 1 && currentIndex === 0) {
+				if (matchesKey(data, "up") && options.items.length > 1 && currentIndex === 0) {
 					selectList.setSelectedIndex(options.items.length - 1);
 					tui.requestRender();
 					return;
 				}
 
 				if (
-					matchesKey(data, Key.down)
+					matchesKey(data, "down")
 					&& options.items.length > 1
 					&& currentIndex === options.items.length - 1
 				) {
@@ -1411,7 +1399,7 @@ async function handleSubsLimits(ctx: ExtensionCommandContext): Promise<void> {
 }
 
 // ==========================================================================
-// Config persistence (~/.pi/agent/multi-pass.json)
+// Config persistence (~/.omp/agent/multi-pass.json)
 // ==========================================================================
 
 interface SubEntry {
@@ -1517,7 +1505,7 @@ interface PoolConfig {
 	memberSchedule?: Record<string, MemberSchedule>;
 	/** Path to a JS module exporting a selector function.
 	 *  Only used when strategy is "custom". Resolved relative to the
-	 *  global config directory (~/.pi/agent/). */
+	 *  global config directory (~/.omp/agent/). */
 	selectorScript?: string;
 }
 
@@ -1546,7 +1534,7 @@ interface MultiPassConfig {
 	presets: PresetConfig[];
 }
 
-/** Project-level config (.pi/multi-pass.json) */
+/** Project-level config (.omp/multi-pass.json) */
 interface ProjectConfig {
 	/** Override pools for this project. If set, replaces global pools. */
 	pools?: PoolConfig[];
@@ -1575,7 +1563,7 @@ function globalConfigPath(): string {
 }
 
 function projectConfigPath(cwd: string): string {
-	return join(cwd, ".pi", "multi-pass.json");
+	return join(cwd, ".omp", "multi-pass.json");
 }
 
 function emptyMultiPassConfig(): MultiPassConfig {
@@ -1768,7 +1756,7 @@ function findSelectableModelForProvider(
 	if (!baseProvider) {
 		return undefined;
 	}
-	for (const baseModel of getModels(baseProvider as any) as Model<Api>[]) {
+	for (const baseModel of getBundledModels(baseProvider as any) as Model<Api>[]) {
 		const candidate = ctx.modelRegistry.find(providerName, baseModel.id);
 		if (candidate) {
 			return candidate as Model<Api>;
@@ -1875,7 +1863,7 @@ function getBaseProvider(providerName: string): string | undefined {
 // ==========================================================================
 
 function cloneModels(originalProvider: string, index: number) {
-	const models = getModels(originalProvider as any) as Model<Api>[];
+	const models = getBundledModels(originalProvider as any) as Model<Api>[];
 	return models.map((m) => ({
 		id: m.id,
 		name: `${m.name} (#${index})`,
@@ -1901,7 +1889,7 @@ function registerSub(pi: ExtensionAPI, entry: SubEntry): void {
 	const name = subProviderName(entry);
 	const oauth = template.buildOAuth(entry.index);
 	const modifyModels = template.buildModifyModels?.(name);
-	const builtinModels = getModels(entry.provider as any) as Model<Api>[];
+	const builtinModels = getBundledModels(entry.provider as any) as Model<Api>[];
 	const baseUrl = builtinModels[0]?.baseUrl || "";
 	const models = cloneModels(entry.provider, entry.index);
 
@@ -2828,7 +2816,7 @@ function resolveSwitchTargetModel(
 	if (!baseProvider) {
 		return undefined;
 	}
-	for (const baseModel of getModels(baseProvider as any) as Model<Api>[]) {
+	for (const baseModel of getBundledModels(baseProvider as any) as Model<Api>[]) {
 		const candidate = ctx.modelRegistry.find(providerName, baseModel.id);
 		if (candidate) {
 			return candidate as Model<Api>;
@@ -2934,7 +2922,8 @@ async function removeSubscriptionEntry(
 	if (ctx.modelRegistry.authStorage.hasAuth(name)) {
 		ctx.modelRegistry.authStorage.logout(name);
 	}
-	pi.unregisterProvider(name);
+	// OMP's public extension API does not expose runtime provider unregistration.
+	// Logout + config removal prevents use now; restart drops the cloned models.
 
 	for (const pool of config.pools) {
 		pool.members = pool.members.filter((member) => member !== name);
@@ -3261,7 +3250,7 @@ async function handleSubsStatus(ctx: ExtensionCommandContext): Promise<void> {
 			status = "logged in (api key)";
 		}
 
-		const modelCount = (getModels(entry.provider as any) as Model<Api>[]).length;
+		const modelCount = (getBundledModels(entry.provider as any) as Model<Api>[]).length;
 		const source = config.subscriptions.find(
 			(s) => s.provider === entry.provider && s.index === entry.index,
 		)
@@ -3707,7 +3696,7 @@ async function promptForPoolDefinition(
 	if (strategy === "custom") {
 		const scriptPath = await ctx.ui.input(
 			"Selector script path",
-			"e.g. selectors/my-pool.js (relative to ~/.pi/agent/)",
+			"e.g. selectors/my-pool.js (relative to ~/.omp/agent/)",
 		);
 		if (scriptPath?.trim()) {
 			selectorScript = scriptPath.trim();
@@ -3788,7 +3777,7 @@ async function createAndPersistPool(
 }
 
 function getSelectableModelsForPool(pool: PoolConfig): string[] {
-	return (getModels(pool.baseProvider as any) as Model<Api>[]).map((model) => model.id);
+	return (getBundledModels(pool.baseProvider as any) as Model<Api>[]).map((model) => model.id);
 }
 
 function createChainValidationError(
@@ -3962,7 +3951,7 @@ async function changePoolStrategy(
 	} else if (nextStrategy === "custom") {
 		const scriptPath = await ctx.ui.input(
 			"Selector script path",
-			"e.g. selectors/my-pool.js (relative to ~/.pi/agent/)",
+			"e.g. selectors/my-pool.js (relative to ~/.omp/agent/)",
 		);
 		if (!scriptPath?.trim()) {
 			ctx.ui.notify("No script path provided. Reverting to round-robin.", "warning");
@@ -5009,7 +4998,7 @@ async function handlePoolMenu(
 		"toggle   -- Enable/disable a pool",
 		"remove   -- Remove a pool",
 		"status   -- Detailed pool status with member health",
-		"project  -- Project-level pool config (.pi/multi-pass.json)",
+		"project  -- Project-level pool config (.omp/multi-pass.json)",
 	];
 
 	const selected = await ctx.ui.select("Pool Manager", actions);
@@ -5168,7 +5157,7 @@ async function handlePresetCreate(
 		const base = getBaseProvider(provider);
 		if (!base) continue;
 
-		const models = (getModels(base as any) as Model<Api>[]).map((m) => m.id);
+		const models = (getBundledModels(base as any) as Model<Api>[]).map((m) => m.id);
 		if (models.length === 0) {
 			ctx.ui.notify(`No models available for ${provider}.`, "warning");
 			continue;
