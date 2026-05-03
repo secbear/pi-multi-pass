@@ -1,18 +1,17 @@
 # omp-multi-pass
 
-Multi-subscription extension for [Oh My Pi](https://github.com/can1357/oh-my-pi) -- use multiple OAuth accounts per provider with automatic rate-limit rotation and project-level affinity.
+Multi-subscription extension for [Oh My Pi](https://github.com/can1357/oh-my-pi) -- use multiple OAuth accounts per supported provider with automatic rate-limit rotation and project-level affinity.
 
 ## Install
 
 ```bash
-# Native local use
-# Put extensions/multi-sub.ts under ~/.omp/agent/extensions/ or add this repo to config.yml extensions.
-omp plugin install git:github.com/secbear/pi-multi-pass
+# Local development install
+omp plugin link /path/to/pi-multi-pass
 ```
 
 ## Features
 
-- **Multiple subscriptions**: Add extra OAuth accounts for any provider
+- **Multiple subscriptions**: Add extra OAuth accounts for supported providers
 - **Rotation pools**: Group subscriptions and auto-rotate on rate limits
 - **Smart pool strategies**: `round-robin`, `quota-first`, `scheduled` (time windows), `custom` (JS script hook)
 - **Fallback chains**: Define ordered cross-pool/model failover via `/pool chain`
@@ -22,6 +21,7 @@ omp plugin install git:github.com/secbear/pi-multi-pass
 - **Project affinity**: Restrict which subs/pools/chains are used per project
 - **TUI management**: `/subs`, `/pool`, and `/mp-preset` commands -- no config files needed
 - **Labels**: Tag subscriptions (e.g. "work", "personal")
+- **Current OMP-native provider scope**: Anthropic and OpenAI Codex. Other upstream Pi providers need separate import-free OAuth ports before enabling.
 
 ## Quick start
 
@@ -303,12 +303,11 @@ Presets are named routing shortcuts that map to an ordered list of provider+mode
 /mp-preset create
   Name: coding-premium
   Entries:
-    1. anthropic / claude-sonnet-4-20250514
-    2. openai-codex / o3
-    3. google-gemini-cli / gemini-2.5-pro
+    1. anthropic / claude-opus-4-7
+    2. openai-codex / gpt-5.5
 
 /mp-preset coding-premium
-  -> Tries anthropic first. If not logged in, tries openai-codex. Then gemini.
+  -> Tries anthropic first. If not logged in, tries openai-codex.
 ```
 
 ### Config
@@ -322,17 +321,15 @@ Presets are stored in `~/.omp/agent/multi-pass.json`:
       "name": "coding-premium",
       "enabled": true,
       "entries": [
-        { "provider": "anthropic", "model": "claude-sonnet-4-20250514", "enabled": true },
-        { "provider": "openai-codex", "model": "o3", "enabled": true },
-        { "provider": "google-gemini-cli", "model": "gemini-2.5-pro", "enabled": true }
+        { "provider": "anthropic", "model": "claude-opus-4-7", "enabled": true },
+        { "provider": "openai-codex", "model": "gpt-5.5", "enabled": true }
       ]
     },
     {
       "name": "coding-budget",
       "enabled": true,
       "entries": [
-        { "provider": "openai-codex", "model": "gpt-4.1-mini", "enabled": true },
-        { "provider": "google-gemini-cli", "model": "gemini-2.5-flash", "enabled": true }
+        { "provider": "openai-codex", "model": "gpt-5.4-mini", "enabled": true }
       ]
     }
   ]
@@ -347,9 +344,7 @@ Presets work with pools: if an entry's provider belongs to a pool, rate-limit fa
 |---|---|
 | `anthropic` | Claude Pro/Max |
 | `openai-codex` | ChatGPT Plus/Pro (Codex) |
-| `github-copilot` | GitHub Copilot |
-| `google-gemini-cli` | Google Cloud Code Assist |
-| `google-antigravity` | Antigravity |
+
 
 ## Built-in limits support
 
@@ -358,10 +353,6 @@ Presets work with pools: if an entry's provider belongs to a pool, rate-limit fa
 Currently implemented:
 
 - `openai-codex`: fetches ChatGPT/Codex usage from `https://chatgpt.com/backend-api/wham/usage` (or `CHATGPT_BASE_URL`), then summarizes the 5-hour and 7-day subscription windows for the base account and any configured extra Codex subscriptions.
-- `google-gemini-cli`: refreshes the saved Google OAuth session when needed, then queries `https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` and summarizes the returned Gemini quota buckets by their bottleneck family (for example `Pro` or `Flash`).
-- `google-antigravity`: refreshes the saved Antigravity OAuth session when needed, then queries `v1internal:fetchAvailableModels` on the Google Cloud Code Assist endpoints with Antigravity-style headers and summarizes the returned model-level bottleneck.
-
-Google quota is not a single flat subscription bucket, so the details view shows one line per returned Gemini family or Antigravity model with its remaining headroom and reset time.
 
 `/subs limits` is an on-demand snapshot. It helps you see which account looks healthiest right now. Automatic switching still happens when the active provider returns a rate-limit-style runtime error and that provider belongs to an enabled pool or chain.
 
