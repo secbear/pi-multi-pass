@@ -28,7 +28,7 @@
   },
   "omp": {
     "extensions": [
-      "./extensions"
+      "./extensions/multi-sub.ts"
     ]
   }
 }

@@ -32,52 +32,41 @@
  *   - google-antigravity (Antigravity)
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { dirname, join } from "path";
+import { loginAnthropic, refreshAnthropicToken } from "../node_modules/@oh-my-pi/pi-ai/src/utils/oauth/anthropic.ts";
+import { loginOpenAICodex, refreshOpenAICodexToken } from "../node_modules/@oh-my-pi/pi-ai/src/utils/oauth/openai-codex.ts";
+import { getBundledModels } from "../node_modules/@oh-my-pi/pi-ai/src/models.ts";
+import type { Api, Model } from "../node_modules/@oh-my-pi/pi-ai/src/types.ts";
 import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionContext,
-	AgentEndEvent,
-} from "@oh-my-pi/pi-coding-agent";
-import {
-	BorderedLoader,
-	DynamicBorder,
-	getAgentDir,
-	keyHint,
-} from "@oh-my-pi/pi-coding-agent";
-import {
-	loginAnthropic,
-	refreshAnthropicToken,
-	loginOpenAICodex,
-	refreshOpenAICodexToken,
-	loginGitHubCopilot,
-	refreshGitHubCopilotToken,
-	getGitHubCopilotBaseUrl,
-	normalizeDomain,
-	loginGeminiCli,
-	refreshGoogleCloudToken,
-	loginAntigravity,
-	refreshAntigravityToken,
-	type OAuthCredentials,
-	type OAuthLoginCallbacks,
-	type OAuthProviderInterface,
-} from "@oh-my-pi/pi-ai/utils/oauth";
-import { getBundledModels, type Api, type Model } from "@oh-my-pi/pi-ai";
-import {
-	Container,
-	SelectList,
-	Text,
-	matchesKey,
-	type SelectItem,
-} from "@oh-my-pi/pi-tui";
+	OAuthCredentials,
+	OAuthLoginCallbacks,
+	OAuthProviderInterface,
+} from "../node_modules/@oh-my-pi/pi-ai/src/utils/oauth/types.ts";
+
+type ExtensionAPI = any;
+type ExtensionCommandContext = any;
+type ExtensionContext = any;
+type AgentEndEvent = any;
+type SelectItem<T = unknown> = any;
+
+
+
+function getAgentDir(): string {
+	return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".omp", "agent");
+}
+
+function initRuntimeExports(_pi: ExtensionAPI): void {
+	// Kept as a seam for future OMP runtime exports. The first OMP-native cut avoids
+	// importing OMP/TUI packages directly because standalone OMP does not resolve
+	// extension package specifiers from native/plugin extension files.
+}
 
 // ==========================================================================
 // Provider templates
 // ==========================================================================
 
-type CopilotCredentials = OAuthCredentials & { enterpriseUrl?: string };
-type GeminiCredentials = OAuthCredentials & { projectId?: string };
 
 interface ProviderTemplate {
 	displayName: string;
@@ -135,96 +124,9 @@ const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 		},
 	},
 
-	"github-copilot": {
-		displayName: "GitHub Copilot",
-		buildOAuth(index: number) {
-			return {
-				name: `GitHub Copilot #${index}`,
-				async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-					return loginGitHubCopilot({
-						onAuth: (url: string, instructions?: string) =>
-							callbacks.onAuth({ url, instructions }),
-						onPrompt: callbacks.onPrompt,
-						onProgress: callbacks.onProgress,
-						signal: callbacks.signal,
-					});
-				},
-				async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-					const creds = credentials as CopilotCredentials;
-					return refreshGitHubCopilotToken(creds.refresh, creds.enterpriseUrl);
-				},
-				getApiKey(credentials: OAuthCredentials): string {
-					return credentials.access;
-				},
-			};
-		},
-		buildModifyModels(providerName: string) {
-			return (models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[] => {
-				const creds = credentials as CopilotCredentials;
-				const domain = creds.enterpriseUrl
-					? (normalizeDomain(creds.enterpriseUrl) ?? undefined)
-					: undefined;
-				const baseUrl = getGitHubCopilotBaseUrl(creds.access, domain);
-				return models.map((m) =>
-					m.provider === providerName ? { ...m, baseUrl } : m,
-				);
-			};
-		},
-	},
-
-	"google-gemini-cli": {
-		displayName: "Google Cloud Code Assist",
-		usesCallbackServer: true,
-		buildOAuth(index: number) {
-			return {
-				name: `Google Cloud Code Assist #${index}`,
-				usesCallbackServer: true,
-				async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-					return loginGeminiCli(
-						callbacks.onAuth,
-						callbacks.onProgress,
-						callbacks.onManualCodeInput,
-					);
-				},
-				async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-					const creds = credentials as GeminiCredentials;
-					if (!creds.projectId) throw new Error("Missing projectId");
-					return refreshGoogleCloudToken(creds.refresh, creds.projectId);
-				},
-				getApiKey(credentials: OAuthCredentials): string {
-					const creds = credentials as GeminiCredentials;
-					return JSON.stringify({ token: creds.access, projectId: creds.projectId });
-				},
-			};
-		},
-	},
-
-	"google-antigravity": {
-		displayName: "Antigravity",
-		usesCallbackServer: true,
-		buildOAuth(index: number) {
-			return {
-				name: `Antigravity #${index}`,
-				usesCallbackServer: true,
-				async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-					return loginAntigravity(
-						callbacks.onAuth,
-						callbacks.onProgress,
-						callbacks.onManualCodeInput,
-					);
-				},
-				async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-					const creds = credentials as GeminiCredentials;
-					if (!creds.projectId) throw new Error("Missing projectId");
-					return refreshAntigravityToken(creds.refresh, creds.projectId);
-				},
-				getApiKey(credentials: OAuthCredentials): string {
-					const creds = credentials as GeminiCredentials;
-					return JSON.stringify({ token: creds.access, projectId: creds.projectId });
-				},
-			};
-		},
-	},
+	// Other providers from the upstream Pi extension intentionally stay out of the
+	// OMP-native first cut until their OAuth helpers can be ported without package
+	// specifier imports. The immediate work/personal use case is Anthropic + Codex.
 };
 
 const SUPPORTED_PROVIDERS = Object.keys(PROVIDER_TEMPLATES);
@@ -629,11 +531,6 @@ function buildQuotaSelectItems(
 	});
 }
 
-function getWrappedSelectIndex(items: SelectItem[], value: string | undefined): number {
-	if (!value) return 0;
-	const index = items.findIndex((item) => item.value === value);
-	return index >= 0 ? index : 0;
-}
 
 async function showWrappedSelect(
 	ctx: ExtensionCommandContext,
@@ -648,82 +545,13 @@ async function showWrappedSelect(
 ): Promise<string | undefined> {
 	if (options.items.length === 0) return undefined;
 
-	if (!ctx.hasUI) {
-		const renderedItems = options.items.map((item) =>
-			item.description ? `${item.label} — ${item.description}` : item.label,
-		);
-		const selected = await ctx.ui.select(options.title, renderedItems);
-		if (!selected) return undefined;
-		const index = renderedItems.indexOf(selected);
-		return index >= 0 ? options.items[index]?.value : undefined;
-	}
-
-	const confirmHint = options.confirmHint || "select";
-	const cancelHint = options.cancelHint || "close";
-
-	const selectedValue = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-		const container = new Container();
-		const footer = [
-			keyHint("tui.select.confirm", confirmHint),
-			keyHint("tui.select.cancel", cancelHint),
-		].join(" • ");
-
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-		container.addChild(new Text(theme.fg("accent", theme.bold(options.title))));
-		if (options.subtitle) {
-			container.addChild(new Text(theme.fg("dim", options.subtitle)));
-		}
-
-		const selectList = new SelectList(options.items, Math.min(options.items.length, 10), {
-			selectedPrefix: (text) => theme.fg("accent", text),
-			selectedText: (text) => theme.fg("accent", text),
-			description: (text) => theme.fg("muted", text),
-			scrollInfo: (text) => theme.fg("dim", text),
-			noMatch: (text) => theme.fg("warning", text),
-		});
-		selectList.setSelectedIndex(getWrappedSelectIndex(options.items, options.initialValue));
-		selectList.onSelect = (item) => done(item.value);
-		selectList.onCancel = () => done(null);
-		container.addChild(selectList);
-		container.addChild(new Text(theme.fg("dim", footer)));
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-
-		return {
-			render(width: number) {
-				return container.render(width);
-			},
-			invalidate() {
-				container.invalidate();
-			},
-			handleInput(data: string) {
-				const current = selectList.getSelectedItem();
-				const currentIndex = current
-					? options.items.findIndex((item) => item.value === current.value)
-					: 0;
-
-				if (matchesKey(data, "up") && options.items.length > 1 && currentIndex === 0) {
-					selectList.setSelectedIndex(options.items.length - 1);
-					tui.requestRender();
-					return;
-				}
-
-				if (
-					matchesKey(data, "down")
-					&& options.items.length > 1
-					&& currentIndex === options.items.length - 1
-				) {
-					selectList.setSelectedIndex(0);
-					tui.requestRender();
-					return;
-				}
-
-				selectList.handleInput(data);
-				tui.requestRender();
-			},
-		};
-	});
-
-	return selectedValue ?? undefined;
+	const renderedItems = options.items.map((item) =>
+		item.description ? `${item.label} — ${item.description}` : item.label,
+	);
+	const selected = await ctx.ui.select(options.title, renderedItems);
+	if (!selected) return undefined;
+	const index = renderedItems.indexOf(selected);
+	return index >= 0 ? options.items[index]?.value : undefined;
 }
 
 async function runQuotaChecks(
@@ -747,31 +575,7 @@ async function loadQuotaResults(
 	ctx: ExtensionCommandContext,
 	accounts: QuotaAccount[],
 ): Promise<QuotaCheckResult[] | null> {
-	if (!ctx.hasUI) {
-		return runQuotaChecks(accounts);
-	}
-
-	return ctx.ui.custom<QuotaCheckResult[] | null>((tui, theme, _kb, done) => {
-		const loader = new BorderedLoader(
-			tui,
-			theme,
-			`Checking limits across ${accounts.length} ${accounts.length === 1 ? "account" : "accounts"}...`,
-		);
-		loader.onAbort = () => done(null);
-
-		runQuotaChecks(accounts, loader.signal)
-			.then(done)
-			.catch((error) => {
-				if (loader.signal.aborted) {
-					done(null);
-					return;
-				}
-				console.error("Failed to load quota checks", error);
-				done(null);
-			});
-
-		return loader;
-	});
+	return runQuotaChecks(accounts);
 }
 
 async function selectQuotaResult(
@@ -5371,6 +5175,7 @@ async function handlePresetMenu(
 // ==========================================================================
 
 export default function multiSub(pi: ExtensionAPI) {
+	initRuntimeExports(pi);
 	const config = loadGlobalConfig();
 	const envEntries = parseEnvConfig();
 	const all = normalizeEntries(mergeConfigs(config, envEntries));
