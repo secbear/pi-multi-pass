@@ -2797,11 +2797,7 @@ async function showSubscriptionActions(
 		return renameSubscriptionLabel(ctx, config, entry);
 	}
 	if (action === "login") {
-		ctx.ui.notify(
-			`Use /login and select "${PROVIDER_TEMPLATES[entry.provider]?.buildOAuth(entry.index).name}" to authenticate.`,
-			"info",
-		);
-		return;
+		return loginSubscriptionEntry(ctx, entry);
 	}
 	if (action === "logout") {
 		ctx.modelRegistry.authStorage.logout(name);
@@ -2901,12 +2897,9 @@ async function handleSubsAdd(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pr
 	);
 
 	if (loginNow) {
-		ctx.ui.notify(
-			`Use /login and select "${PROVIDER_TEMPLATES[entry.provider]?.buildOAuth(entry.index).name}" to authenticate.`,
-			"info",
-		);
+		await loginSubscriptionEntry(ctx, entry);
 	} else {
-		ctx.ui.notify(`Added ${subDisplayName(entry)}. Use /subs login to authenticate.`, "info");
+		ctx.ui.notify(`Added ${subDisplayName(entry)}. Use /subs login ${subProviderName(entry)} to authenticate.`, "info");
 	}
 }
 
@@ -2945,7 +2938,69 @@ async function handleSubsRemove(
 	return removeSubscriptionEntry(pi, ctx, config, entry, poolManager);
 }
 
-async function handleSubsLogin(ctx: ExtensionCommandContext): Promise<void> {
+async function loginSubscriptionEntry(ctx: ExtensionCommandContext, entry: SubEntry): Promise<boolean> {
+	const providerName = subProviderName(entry);
+	const displayName = subDisplayName(entry);
+	const authStorage = ctx.modelRegistry.authStorage as any;
+	const login = authStorage.login;
+
+	if (ctx.modelRegistry.authStorage.hasAuth(providerName)) {
+		ctx.ui.notify(`${displayName} is already logged in.`, "info");
+		return true;
+	}
+	if (typeof login !== "function") {
+		ctx.ui.notify("This OMP build does not expose authStorage.login to extensions.", "error");
+		return false;
+	}
+
+	ctx.ui.setStatus("multi-pass-login", `Logging in to ${displayName}…`);
+	try {
+		await login.call(authStorage, providerName, {
+			onAuth: (info: { url: string; instructions?: string }) => {
+				const lines = [
+					`Login to ${displayName}`,
+					info.url,
+					"Complete the browser OAuth flow. If the callback does not return automatically, paste the redirect URL/code when prompted.",
+				];
+				if (info.instructions) lines.splice(2, 0, info.instructions);
+				ctx.ui.setWidget("multi-pass-login", lines);
+				ctx.ui.notify(`Login URL ready for ${displayName}.`, "info");
+			},
+			onPrompt: async (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => {
+				const answer = await ctx.ui.input(prompt.message, prompt.placeholder);
+				if (answer === undefined && !prompt.allowEmpty) {
+					throw new Error("Login cancelled");
+				}
+				return answer ?? "";
+			},
+			onProgress: (message: string) => {
+				ctx.ui.setStatus("multi-pass-login", message);
+			},
+			onManualCodeInput: async () => {
+				const answer = await ctx.ui.input(
+					"Paste the authorization code or full redirect URL",
+					"https://localhost/...",
+				);
+				if (answer === undefined) {
+					throw new Error("Login cancelled");
+				}
+				return answer;
+			},
+		});
+		await ctx.modelRegistry.refresh();
+		ctx.ui.notify(`Successfully logged in to ${displayName}.`, "info");
+		return true;
+	} catch (error: unknown) {
+		ctx.ui.notify(`Login failed for ${displayName}: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return false;
+	} finally {
+		ctx.ui.setStatus("multi-pass-login", undefined);
+		ctx.ui.setWidget("multi-pass-login", undefined);
+	}
+}
+
+
+async function handleSubsLogin(ctx: ExtensionCommandContext, requestedProviderName?: string): Promise<void> {
 	const config = loadGlobalConfig();
 	const envEntries = parseEnvConfig();
 	const all = normalizeEntries(mergeConfigs(config, envEntries));
@@ -2964,27 +3019,48 @@ async function handleSubsLogin(ctx: ExtensionCommandContext): Promise<void> {
 		return;
 	}
 
-	const selectedProviderName = await showWrappedSelect(ctx, {
-		title: "Login to subscription",
-		subtitle: "Select a subscription to see login instructions.",
-		initialValue: ctx.model?.provider,
-		items: notLoggedIn.map((entry) => ({
-			value: subProviderName(entry),
-			label: subDisplayName(entry),
-			description: "not logged in",
-		})),
-		confirmHint: "open",
-		cancelHint: "back",
-	});
-	if (!selectedProviderName) return;
+	const requested = requestedProviderName?.trim().toLowerCase();
+	let entry: SubEntry | undefined;
+	if (requested) {
+		entry = notLoggedIn.find(
+			(candidate) =>
+				subProviderName(candidate).toLowerCase() === requested ||
+				subDisplayName(candidate).toLowerCase() === requested,
+		);
+		if (!entry) {
+			const existing = all.find(
+				(candidate) =>
+					subProviderName(candidate).toLowerCase() === requested ||
+					subDisplayName(candidate).toLowerCase() === requested,
+			);
+			ctx.ui.notify(
+				existing
+					? `${subDisplayName(existing)} is already logged in.`
+					: `Unknown or unsupported subscription: ${requestedProviderName}`,
+				existing ? "info" : "error",
+			);
+			return;
+		}
+	} else {
+		const selectedProviderName = await showWrappedSelect(ctx, {
+			title: "Login to subscription",
+			subtitle: "Select a subscription to authenticate.",
+			initialValue: ctx.model?.provider,
+			items: notLoggedIn.map((candidate) => ({
+				value: subProviderName(candidate),
+				label: subDisplayName(candidate),
+				description: "not logged in",
+			})),
+			confirmHint: "login",
+			cancelHint: "back",
+		});
+		if (!selectedProviderName) return;
 
-	const entry = notLoggedIn.find((candidate) => subProviderName(candidate) === selectedProviderName);
-	if (!entry) return;
+		entry = notLoggedIn.find((candidate) => subProviderName(candidate) === selectedProviderName);
+		if (!entry) return;
+	}
 
-	ctx.ui.notify(
-		`Use /login and select "${PROVIDER_TEMPLATES[entry.provider]?.buildOAuth(entry.index).name}" to authenticate.`,
-		"info",
-	);
+	await loginSubscriptionEntry(ctx, entry);
 }
 
 async function handleSubsLogout(ctx: ExtensionCommandContext): Promise<void> {
@@ -5353,7 +5429,7 @@ export default function multiSub(pi: ExtensionAPI) {
 				case "delete":
 					return handleSubsRemove(pi, ctx, poolManager);
 				case "login":
-					return handleSubsLogin(ctx);
+					return handleSubsLogin(ctx, rest || undefined);
 				case "logout":
 					return handleSubsLogout(ctx);
 				case "switch":

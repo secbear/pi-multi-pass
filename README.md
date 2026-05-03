@@ -27,9 +27,9 @@ omp plugin link /path/to/pi-multi-pass
 
 ```
 /subs add              Pick a provider, add a subscription
-/login                 Authenticate the new subscription
+/subs login            Authenticate the new subscription
 /subs switch           Manually switch to another subscription/provider
-/subs limits           Check built-in quota support (Codex + Google)
+/subs limits           Check built-in quota support (Codex in the current OMP-native scope)
 /pool create           Group subs into a rotation pool (with strategy selection)
 /pool chain create     Build an ordered fallback chain across pools
 /mp-preset create         Create a named routing preset across providers
@@ -51,7 +51,7 @@ When one account hits a rate limit during an assistant turn, multi-pass automati
 /subs switch       Manually switch to a subscription/provider now
 /subs list         List subscriptions with auth status; select one for quick actions
 /subs status       Detailed status (token expiry, pool membership)
-/subs limits       Check built-in quota/usage support (Codex + Google)
+/subs limits       Check built-in quota/usage support (Codex in the current OMP-native scope)
 ```
 
 ### `/pool` -- Rotation pool and chain management
@@ -180,7 +180,7 @@ All strategies fall back to round-robin when their specific data is unavailable.
 
 You have 3 Codex accounts in a pool. Account A has 80% of its 5-hour window left, account B has 20%, account C has 60%. On failover, `quota-first` picks account A first instead of just the next one in rotation order.
 
-Uses the same built-in quota checkers as `/subs limits` (currently Codex and Google providers).
+Uses the same built-in quota checkers as `/subs limits` (Codex for the current OMP-native provider scope).
 
 ```json
 {
