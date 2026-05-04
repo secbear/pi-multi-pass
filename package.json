@@ -22,9 +22,9 @@
   },
   "type": "module",
   "dependencies": {
-    "@oh-my-pi/pi-ai": "13.9.2",
-    "@oh-my-pi/pi-coding-agent": "13.9.2",
-    "@oh-my-pi/pi-tui": "13.9.2"
+    "@oh-my-pi/pi-ai": "14.6.2",
+    "@oh-my-pi/pi-coding-agent": "14.6.2",
+    "@oh-my-pi/pi-tui": "14.6.2"
   },
   "omp": {
     "extensions": [
