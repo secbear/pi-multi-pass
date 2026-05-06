@@ -1709,19 +1709,30 @@ function registerSub(pi: ExtensionAPI, entry: SubEntry): void {
 // Pool rotation engine
 // ==========================================================================
 
+type FailoverErrorKind = "rate-limited" | "provider-overloaded";
+
 const RATE_LIMIT_PATTERNS = [
 	/usage.?limit/i,
 	/rate.?limit/i,
 	/limit.*reached/i,
 	/too many requests/i,
-	/overloaded/i,
-	/capacity/i,
 	/429/,
 	/quota/i,
 ];
 
-function isRateLimitError(errorMessage: string): boolean {
-	return RATE_LIMIT_PATTERNS.some((p) => p.test(errorMessage));
+const PROVIDER_OVERLOAD_PATTERNS = [
+	/overloaded/i,
+	/capacity/i,
+];
+
+function classifyFailoverError(errorMessage: string): FailoverErrorKind | null {
+	if (PROVIDER_OVERLOAD_PATTERNS.some((p) => p.test(errorMessage))) {
+		return "provider-overloaded";
+	}
+	if (RATE_LIMIT_PATTERNS.some((p) => p.test(errorMessage))) {
+		return "rate-limited";
+	}
+	return null;
 }
 
 // ==========================================================================
@@ -2437,15 +2448,18 @@ class PoolManager {
 		config: MultiPassConfig,
 	): Promise<boolean> {
 		if (!currentModel) return false;
-		if (!isRateLimitError(errorMessage)) return false;
+		const errorKind = classifyFailoverError(errorMessage);
+		if (!errorKind) return false;
 
 		const pool = this.getPoolForProvider(currentModel.provider);
 		if (!pool) return false;
 
 		const cascade = this.ensureCascadeState(lastUserPrompt, currentModel);
 
-		// Mark current as exhausted before planning the forward-only cascade.
-		this.markExhausted(currentModel.provider);
+		if (errorKind === "rate-limited") {
+			// Only actual rate limits should trigger the normal cooldown path.
+			this.markExhausted(currentModel.provider);
+		}
 
 		const plan = this.buildFailoverPlan(
 			currentModel,
@@ -2477,7 +2491,10 @@ class PoolManager {
 
 		const nextCandidate = plan.candidates[0];
 		if (!nextCandidate) {
-			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
+			ctx.ui.notify(
+				formatFailoverExhausted(pool.name, currentModel.provider, errorKind),
+				"warning",
+			);
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
 			return false;
 		}
@@ -2488,7 +2505,10 @@ class PoolManager {
 				`[pool:${nextCandidate.poolName}] ${nextCandidate.provider} -> ${nextCandidate.modelId} skipped (model missing at runtime); cascade exhausted; no later eligible target`,
 				"warning",
 			);
-			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
+			ctx.ui.notify(
+				formatFailoverExhausted(pool.name, currentModel.provider, errorKind),
+				"warning",
+			);
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
 			return false;
 		}
@@ -2499,7 +2519,10 @@ class PoolManager {
 				`[pool:${nextCandidate.poolName}] ${nextCandidate.provider} skipped (authentication unavailable during switch); cascade exhausted; no later eligible target`,
 				"warning",
 			);
-			ctx.ui.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
+			ctx.ui.notify(
+				formatFailoverExhausted(pool.name, currentModel.provider, errorKind),
+				"warning",
+			);
 			ctx.ui.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
 			return false;
 		}
@@ -2510,7 +2533,7 @@ class PoolManager {
 		}
 
 		ctx.ui.notify(
-			formatFailoverTransition(pool.name, currentModel.provider, nextCandidate),
+			formatFailoverTransition(pool.name, currentModel.provider, errorKind, nextCandidate),
 			"info",
 		);
 		ctx.ui.setStatus("multi-pass", formatFailoverStatus(nextCandidate));
@@ -4256,16 +4279,27 @@ function formatFailoverContinuation(
 function formatFailoverTransition(
 	poolName: string,
 	currentProvider: string,
+	errorKind: FailoverErrorKind,
 	nextCandidate: Pick<FailoverCandidate, "provider" | "modelId" | "source" | "poolName" | "chainName" | "chainIndex">,
 ): string {
 	const phase = nextCandidate.source === "chain"
 		? `advancing to chain ${nextCandidate.chainName}#${(nextCandidate.chainIndex ?? 0) + 1}`
 		: `rotating within pool ${poolName}`;
-	return `[pool:${poolName}] Rate limited on ${currentProvider}; ${phase}; active ${formatFailoverTarget(nextCandidate)}`;
+	const reason = errorKind === "provider-overloaded"
+		? `Provider overloaded on ${currentProvider}`
+		: `Rate limited on ${currentProvider}`;
+	return `[pool:${poolName}] ${reason}; ${phase}; active ${formatFailoverTarget(nextCandidate)}`;
 }
 
-function formatFailoverExhausted(poolName: string, currentProvider: string): string {
-	return `[pool:${poolName}] Failover exhausted after ${currentProvider}; no eligible target remained in this cascade.`;
+function formatFailoverExhausted(
+	poolName: string,
+	currentProvider: string,
+	errorKind: FailoverErrorKind,
+): string {
+	const reason = errorKind === "provider-overloaded"
+		? `Provider overloaded on ${currentProvider}`
+		: `Rate limited on ${currentProvider}`;
+	return `[pool:${poolName}] ${reason}; no eligible target remained in this cascade.`;
 }
 
 function classifyPoolMemberSkip(
@@ -5383,7 +5417,8 @@ export default function multiSub(pi: ExtensionAPI) {
 			}),
 		);
 
-		if (!rotated && isRateLimitError(assistantMsg.errorMessage)) {
+		const errorKind = classifyFailoverError(assistantMsg.errorMessage);
+		if (!rotated && errorKind) {
 			const pool = ctx.model
 				? poolManager.getPoolForProvider(ctx.model.provider)
 				: undefined;
@@ -5394,7 +5429,9 @@ export default function multiSub(pi: ExtensionAPI) {
 				);
 				if (available.length === 0) {
 					ctx.ui.notify(
-						`[pool:${pool.name}] All members rate limited. Try again in a few minutes.`,
+						errorKind === "provider-overloaded"
+							? `[pool:${pool.name}] Provider overloaded and no fallback was available. Try again shortly.`
+							: `[pool:${pool.name}] All members rate limited. Try again in a few minutes.`,
 						"warning",
 					);
 				}

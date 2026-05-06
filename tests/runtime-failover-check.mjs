@@ -88,15 +88,34 @@ function formatFailoverContinuation(nextCandidate) {
   return `${phase} -> ${formatFailoverTarget(nextCandidate)}`;
 }
 
-function formatFailoverTransition(poolName, currentProvider, nextCandidate) {
+const RATE_LIMIT_PATTERNS = [/limit/i, /429/, /too many requests/i, /quota/i];
+const PROVIDER_OVERLOAD_PATTERNS = [/overloaded/i, /capacity/i];
+
+function classifyFailoverError(errorMessage) {
+  if (PROVIDER_OVERLOAD_PATTERNS.some((pattern) => pattern.test(errorMessage))) {
+    return "provider-overloaded";
+  }
+  if (RATE_LIMIT_PATTERNS.some((pattern) => pattern.test(errorMessage))) {
+    return "rate-limited";
+  }
+  return null;
+}
+
+function formatFailoverTransition(poolName, currentProvider, errorKind, nextCandidate) {
   const phase = nextCandidate.source === "chain"
     ? `advancing to chain ${nextCandidate.chainName}#${(nextCandidate.chainIndex ?? 0) + 1}`
     : `rotating within pool ${poolName}`;
-  return `[pool:${poolName}] Rate limited on ${currentProvider}; ${phase}; active ${formatFailoverTarget(nextCandidate)}`;
+  const reason = errorKind === "provider-overloaded"
+    ? `Provider overloaded on ${currentProvider}`
+    : `Rate limited on ${currentProvider}`;
+  return `[pool:${poolName}] ${reason}; ${phase}; active ${formatFailoverTarget(nextCandidate)}`;
 }
 
-function formatFailoverExhausted(poolName, currentProvider) {
-  return `[pool:${poolName}] Failover exhausted after ${currentProvider}; no eligible target remained in this cascade.`;
+function formatFailoverExhausted(poolName, currentProvider, errorKind) {
+  const reason = errorKind === "provider-overloaded"
+    ? `Provider overloaded on ${currentProvider}`
+    : `Rate limited on ${currentProvider}`;
+  return `[pool:${poolName}] ${reason}; no eligible target remained in this cascade.`;
 }
 
 class RuntimeHarness {
@@ -331,13 +350,16 @@ class RuntimeHarness {
 
   async handleError(errorMessage, currentModel, prompt) {
     if (!currentModel) return false;
-    if (!/limit|429|too many requests|quota/i.test(errorMessage)) return false;
+    const errorKind = classifyFailoverError(errorMessage);
+    if (!errorKind) return false;
 
     const pool = this.getPoolForProvider(currentModel.provider);
     if (!pool) return false;
 
     const cascade = this.ensureCascadeState(prompt, currentModel);
-    this.markExhausted(currentModel.provider);
+    if (errorKind === "rate-limited") {
+      this.markExhausted(currentModel.provider);
+    }
     const plan = this.buildFailoverPlan(currentModel);
 
     const continuation = formatFailoverContinuation(plan.candidates[0]);
@@ -347,7 +369,7 @@ class RuntimeHarness {
 
     const nextCandidate = plan.candidates[0];
     if (!nextCandidate) {
-      this.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
+      this.notify(formatFailoverExhausted(pool.name, currentModel.provider, errorKind), "warning");
       this.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
       return false;
     }
@@ -358,7 +380,7 @@ class RuntimeHarness {
         `[pool:${nextCandidate.poolName}] ${nextCandidate.provider} -> ${nextCandidate.modelId} skipped (model missing at runtime); cascade exhausted; no later eligible target`,
         "warning",
       );
-      this.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
+      this.notify(formatFailoverExhausted(pool.name, currentModel.provider, errorKind), "warning");
       this.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
       return false;
     }
@@ -369,7 +391,7 @@ class RuntimeHarness {
         `[pool:${nextCandidate.poolName}] ${nextCandidate.provider} skipped (authentication unavailable during switch); cascade exhausted; no later eligible target`,
         "warning",
       );
-      this.notify(formatFailoverExhausted(pool.name, currentModel.provider), "warning");
+      this.notify(formatFailoverExhausted(pool.name, currentModel.provider, errorKind), "warning");
       this.setStatus("multi-pass", formatFailoverStatus(null, pool.name));
       return false;
     }
@@ -379,7 +401,7 @@ class RuntimeHarness {
       cascade.visitedChainIndexes.add(nextCandidate.chainIndex);
     }
 
-    this.notify(formatFailoverTransition(pool.name, currentModel.provider, nextCandidate), "info");
+    this.notify(formatFailoverTransition(pool.name, currentModel.provider, errorKind, nextCandidate), "info");
     this.setStatus("multi-pass", formatFailoverStatus(nextCandidate));
     if (prompt) {
       this.suppressNextStartTurn = true;
@@ -614,7 +636,7 @@ async function runFailurePathChecks() {
       "[pool:backup] backup -> claude-ghost skipped (entry disabled); cascade exhausted; no later eligible target",
       "[pool:solo] google-gemini-cli skipped (cooldown active); cascade exhausted; no later eligible target",
       "[pool:solo] solo -> gemini-2.5-pro skipped (no eligible members); cascade exhausted; no later eligible target",
-      "[pool:primary] Failover exhausted after anthropic; no eligible target remained in this cascade.",
+      "[pool:primary] Rate limited on anthropic; no eligible target remained in this cascade.",
     ],
   );
   assert.deepEqual(snapshot.statuses.at(-1), "pool:primary | cascade exhausted | no eligible target");
@@ -716,6 +738,48 @@ async function runRetryStartTurnChecks() {
   console.log("retry-start-turn checks passed");
 }
 
+async function runOverloadChecks() {
+  const config = createConfig();
+  const harness = new RuntimeHarness(config, [
+    "anthropic",
+    "anthropic-2",
+    "anthropic-3",
+    "openai-codex",
+    "openai-codex-2",
+    "google-gemini-cli",
+  ]);
+
+  const firstPrompt = "status update";
+  harness.startTurn(firstPrompt, { provider: "anthropic", id: "claude-sonnet-4" });
+  const first = await harness.handleError("overloaded_error: Overloaded", { provider: "anthropic", id: "claude-sonnet-4" }, firstPrompt);
+  assert.equal(first, true);
+
+  const secondPrompt = "retry after overload";
+  harness.startTurn(secondPrompt, { provider: "anthropic-2", id: "claude-sonnet-4" });
+  const second = await harness.handleError("429 rate limit", { provider: "anthropic-2", id: "claude-sonnet-4" }, secondPrompt);
+  assert.equal(second, true);
+
+  const snapshot = harness.snapshot();
+  assert.deepEqual(snapshot.setModelCalls, [
+    "anthropic-2:claude-sonnet-4",
+    "anthropic-3:claude-sonnet-4",
+  ]);
+  assert.equal(
+    snapshot.notifications.some(
+      (entry) => entry.level === "warning" && entry.message.includes("anthropic skipped (cooldown active)"),
+    ),
+    false,
+  );
+  assert.equal(
+    snapshot.notifications.some(
+      (entry) => entry.message.includes("Provider overloaded on anthropic"),
+    ),
+    true,
+  );
+
+  console.log("overload checks passed");
+}
+
 runCoreChecks();
 runSessionStatusChecks();
 
@@ -733,6 +797,10 @@ if (process.argv.includes("--no-loop")) {
 
 if (process.argv.includes("--failure-path")) {
   runFailurePathChecks();
+}
+
+if (process.argv.includes("--overload")) {
+  await runOverloadChecks();
 }
 
 console.log("runtime failover checks passed");
