@@ -4,8 +4,16 @@ Multi-subscription extension for [Oh My Pi](https://github.com/can1357/oh-my-pi)
 
 ## Install
 
+### Canonical install after private publish
 ```bash
-# Local development install
+export GITHUB_PACKAGES_TOKEN=...
+omp plugin install @secbear/omp-multi-pass@<version>
+```
+
+GitHub Packages requires a scoped package name and registry auth on each machine. In this harness, `~/.omp/plugins/.npmrc` should point the `@secbear` scope at `https://npm.pkg.github.com` and read the token from `GITHUB_PACKAGES_TOKEN`.
+
+### Local development install
+```bash
 omp plugin link /path/to/pi-multi-pass
 ```
 
